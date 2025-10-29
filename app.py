@@ -1,145 +1,167 @@
 import streamlit as st
-import numpy as np
 import tensorflow as tf
-from tensorflow.keras.models import load_model
+import numpy as np
+from PIL import Image, ImageOps
 from streamlit_drawable_canvas import st_canvas
-from PIL import Image
-import pandas as pd # Import pandas here to ensure it's loaded early if needed
-import os # Import OS for checking directory/file existence
 
-# --- 1. STREAMLIT CONFIGURATION (MUST BE THE FIRST COMMAND) ---
-st.set_page_config(
-    page_title="CNN Digit Recognizer",
-    layout="centered",
-    initial_sidebar_state="expanded"
-)
+# --- Configuration ---
+MODEL_PATH = 'mnist_model.keras'
+IMG_WIDTH = 28
+IMG_HEIGHT = 28
 
-# --- 2. MODEL CONFIGURATION ---
-# NOTE: Using the modern Keras format (.keras) is the most robust and recommended format.
-MODEL_PATH_KERAS = 'cnn_digit_model.keras'
-MODEL_PATH_H5 = 'cnn_digit_model.h5' 
+st.set_page_config(layout="wide")
 
-CANVAS_SIZE = 200
-IMAGE_SIZE = 28 # MNIST standard size
-MODEL_INPUT_SHAPE = (1, IMAGE_SIZE, IMAGE_SIZE, 1)
+# --- Initialize session state for canvas key ---
+# This is used to force a re-render of the canvas when clearing
+if "canvas_key" not in st.session_state:
+    st.session_state.canvas_key = "canvas_0"
 
-# --- 3. MODEL LOADING (Cached for Efficiency) ---
+# --- Model Loading ---
 @st.cache_resource
-def load_cnn_model():
-    """Attempts to load the model, checking for .keras first, then .h5."""
-    
-    model_path_to_load = None
-
-    # Priority 1: Check for the modern .keras format (RECOMMENDED)
-    if os.path.exists(MODEL_PATH_KERAS):
-        model_path_to_load = MODEL_PATH_KERAS
-    # Priority 2: Fallback to the legacy .h5 format
-    elif os.path.exists(MODEL_PATH_H5):
-        model_path_to_load = MODEL_PATH_H5
-    
-    if model_path_to_load is None:
-        st.error("Error: Model file not found.")
-        st.info(f"Please save your trained model in the app folder using: `model.save('{MODEL_PATH_KERAS}')` or `model.save('{MODEL_PATH_H5}')`.")
-        return None
-
-    # Attempt to load the model
+def load_model(path):
+    """Loads the pre-trained Keras model."""
     try:
-        model = load_model(model_path_to_load)
+        model = tf.keras.models.load_model(path)
         return model
     except Exception as e:
-        # This catches file signature errors (the persistent problem)
-        st.error(f"Error loading model from '{model_path_to_load}': {e}")
-        st.warning(
-            f"**CRITICAL ACTION REQUIRED:** The model file is structurally invalid. "
-            f"You MUST go back to your training notebook and execute the following line EXACTLY: "
-            f"`model.save('{MODEL_PATH_KERAS}')`. "
-            f"Then, check that the resulting file size is large (10+ MB)."
-        )
-        return None
+        st.error(f"Error loading model: {e}")
+        st.stop()
 
-# Load the model once
-model = load_cnn_model()
+model = load_model(MODEL_PATH)
 
-# --- 4. STREAMLIT UI SETUP (Run only if model loaded successfully) ---
-st.title("✍️ Interactive CNN Digit Recognizer")
-st.markdown("Draw a single digit (0-9) on the canvas below, then click 'Predict'!")
-
-
-if model is not None:
-    # --- Drawing Canvas ---
-    # Create a canvas component
-    canvas_result = st_canvas(
-        fill_color="#000000",  # Background color (black)
-        stroke_width=15,       # Width of the drawing stroke
-        stroke_color="#FFFFFF",# Color of the drawing stroke (white, like MNIST)
-        background_color="#000000",
-        height=CANVAS_SIZE,
-        width=CANVAS_SIZE,
-        drawing_mode="freedraw",
-        key="canvas",
-    )
-
-    st.markdown("---")
+# --- Image Pre-processing Functions ---
+def preprocess_canvas_image(img_data):
+    """
+    Pre-processes the image data from the drawable canvas.
+    Converts 280x280 RGBA to 28x28 grayscale.
+    """
+    # Convert canvas data to PIL Image
+    img = Image.fromarray(img_data.astype('uint8'), 'RGBA')
     
-    # --- Prediction Logic ---
-    if st.button('🚀 Predict Digit', use_container_width=True):
-        if canvas_result.image_data is not None:
-            # 1. Convert drawn data to PIL Image
-            img = Image.fromarray(canvas_result.image_data.astype('uint8'), 'RGBA')
-            
-            # 2. Convert to grayscale and resize to 28x28
-            img_gs = img.convert('L').resize((IMAGE_SIZE, IMAGE_SIZE))
+    # Convert to grayscale
+    img = img.convert('L')
+    
+    # Resize to 28x28 (model's expected input size)
+    img = img.resize((IMG_WIDTH, IMG_HEIGHT), Image.Resampling.LANCZOS)
+    
+    # Convert to numpy array and normalize
+    img_array = np.array(img) / 255.0
+    
+    # Reshape for the model: (1, 28, 28)
+    # The model's first layer handles adding the "channel" dimension
+    return np.expand_dims(img_array, axis=0)
 
-            # 3. Convert to numpy array and normalize
-            img_array = np.array(img_gs)
+def preprocess_uploaded_image(img):
+    """
+    Pre-processes an image file uploaded by the user.
+    Converts to grayscale, inverts colors, resizes, and normalizes.
+    """
+    # Convert to grayscale
+    img = img.convert('L')
+    
+    # Invert colors (MNIST is white digit on black background)
+    img = ImageOps.invert(img)
+    
+    # Resize to 28x28
+    img = img.resize((IMG_WIDTH, IMG_HEIGHT), Image.Resampling.LANCZOS)
+    
+    # Convert to numpy array and normalize
+    img_array = np.array(img) / 255.0
+    
+    # Reshape for the model: (1, 28, 28)
+    return np.expand_dims(img_array, axis=0)
 
-            # Invert colors: 255 - pixel_value ensures black becomes 255 (white) and white becomes 0 (black).
-            # Then we divide by 255.0 for final normalization to 0-1.
-            img_array = 255 - img_array
-            img_array = img_array / 255.0
+# --- Prediction Function ---
+def predict(image_array):
+    """Runs prediction and returns the digit and confidence."""
+    prediction = model.predict(image_array)
+    predicted_digit = np.argmax(prediction)
+    confidence = np.max(prediction) * 100
+    return predicted_digit, confidence
 
-            # 4. Reshape for the model: (1, 28, 28, 1)
-            input_tensor = img_array.reshape(MODEL_INPUT_SHAPE)
+# --- Streamlit UI ---
+st.title(" MNIST Handwritten Digit Recognizer")
+st.markdown("Draw a digit or upload an image to get a prediction from a CNN model.")
 
-            # 5. Make prediction
-            prediction = model.predict(input_tensor)
-            
-            # Get the predicted digit (index of the highest probability)
-            predicted_digit = np.argmax(prediction)
-            
-            # Get the confidence score
-            confidence = prediction[0][predicted_digit] * 100
+tab1, tab2 = st.tabs(["Draw a Digit", "Upload an Image (Drag & Drop)"])
 
-            st.success(f"## Predicted Digit: **{predicted_digit}**")
-            st.info(f"Confidence: **{confidence:.2f}%**")
-            
-            st.markdown("---")
+# --- Tab 1: Draw a Digit (Recommended) ---
+with tab1:
+    st.subheader("Draw your digit here (best results):")
+    st.markdown("Draw a single white digit on the black canvas. The model is trained on this style.")
 
-            # --- Display all probabilities ---
-            st.subheader("Model Confidence Scores")
-            
-            # Prepare data for a bar chart
-            prob_df = pd.DataFrame({
-                'Digit': list(range(10)),
-                'Probability': prediction[0]
-            })
-            
-            st.bar_chart(prob_df.set_index('Digit'))
+    col1, col2 = st.columns([1, 1])
 
-            # --- Display Preprocessed Image ---
-            with st.expander("Show Model Input Image"):
-                # Display the preprocessed 28x28 image for verification
-                display_img_array = (input_tensor[0, :, :, 0] * 255).astype(np.uint8)
-                display_image = Image.fromarray(display_img_array, mode='L')
-                st.image(
-                    display_image, 
-                    caption="Preprocessed 28x28 Image (Model Input)", 
-                    use_container_width=True # Changed from use_column_width
-                )
-                st.write("The model saw the image above. It is white on black, normalized, and sized 28x28.")
+    with col1:
+        # Create a 280x280 canvas (10x the model size for easier drawing)
+        canvas_result = st_canvas(
+            fill_color="rgba(0, 0, 0, 0)",  # Fixed fill color
+            stroke_width=20,  # Thicker stroke for better visibility
+            stroke_color="#FFFFFF",
+            background_color="#000000",
+            width=280,
+            height=280,
+            drawing_mode="freedraw",
+            # Use the key from session state
+            key=st.session_state.canvas_key,
+        )
+
+    with col2:
+        st.subheader("Prediction:")
+        predict_button = st.button("Predict Drawing", key="predict_canvas")
         
-        else:
-            st.warning("Please draw a digit on the canvas first!")
-else:
-    # If model is None, display the final placeholder message
-    st.warning("Application requires a correctly saved model file (.keras or .h5) to proceed.")
+        # Add the clear button
+        if st.button("Clear Drawing", key="clear_canvas"):
+            # Increment the key counter in session state to force a rerender
+            current_key_index = int(st.session_state.canvas_key.split('_')[-1])
+            st.session_state.canvas_key = f"canvas_{current_key_index + 1}"
+            # Force an immediate rerun to show the cleared canvas
+            st.rerun()
+
+        if predict_button:
+            if canvas_result.image_data is not None:
+                # Get the image data from the canvas
+                img_data = canvas_result.image_data
+                
+                # Pre-process the image
+                processed_img = preprocess_canvas_image(img_data)
+                
+                # Make prediction
+                digit, confidence = predict(processed_img)
+                
+                st.markdown(f"## Predicted Digit: `{digit}`")
+                st.markdown(f"**Confidence:** `{confidence:.2f}%`")
+            else:
+                st.warning("Please draw a digit first.")
+
+# --- Tab 2: Upload an Image ---
+with tab2:
+    st.subheader("Upload your image (supports drag & drop):")
+    st.warning(
+        "**Note:** This model was trained on simple white-on-black, centered digits. "
+        "Real-world images with backgrounds or different styling may not predict accurately."
+    )
+    
+    uploaded_file = st.file_uploader("Choose an image...", type=["png", "jpg", "jpeg"])
+    
+    if uploaded_file is not None:
+        col1, col2 = st.columns([1, 1])
+        
+        try:
+            # Open and display the uploaded image
+            img = Image.open(uploaded_file)
+            with col1:
+                st.markdown("**Your Upload:**")
+                st.image(img, caption="Uploaded Image", use_column_width=True)
+            
+            # Pre-process and predict
+            processed_img = preprocess_uploaded_image(img)
+            digit, confidence = predict(processed_img)
+
+            with col2:
+                st.markdown("**Prediction:**")
+                st.markdown(f"## Predicted Digit: `{digit}`")
+                st.markdown(f"**Confidence:** `{confidence:.2f}%`")
+
+        except Exception as e:
+            st.error(f"Error processing image: {e}")
